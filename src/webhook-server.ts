@@ -124,8 +124,9 @@ app.post("/webhook", async (req: Request, res: Response) => {
 
     const text = commentText.toLowerCase();
     if (text.includes(KEYWORD_VALIDATE)) {
-      console.log(`  → "${KEYWORD_VALIDATE}" detectado: lanzando validación`);
-      shouldValidate = true;
+      // Fase 2 DESACTIVADA en el servidor: correr pest/infection necesita la app
+      // Laravel completa (BD, redis, extensiones). Se hará en CI más adelante.
+      console.log(`  → "${KEYWORD_VALIDATE}" detectado, pero la validación está DESACTIVADA en el servidor (Fase 2 → CI).`);
     } else if (text.includes(KEYWORD_SCAFFOLD)) {
       console.log(`  → "${KEYWORD_SCAFFOLD}" detectado: lanzando scaffold`);
       shouldScaffold = true;

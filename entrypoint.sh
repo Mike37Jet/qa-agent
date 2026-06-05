@@ -24,13 +24,13 @@ prepare_repo() {
 
   if [ ! -d "$REPO_PATH/.git" ]; then
     echo "▶ Clonando repo PHP en $REPO_PATH ..."
-    if git clone "$PHP_REPO_URL" "$REPO_PATH"; then
-      echo "▶ composer install ..."
-      ( cd "$REPO_PATH" && composer install --no-interaction --prefer-dist ) \
-        || echo "⚠ composer install falló (revisa el repo PHP)."
-    else
-      echo "⚠ git clone falló. Revisa PHP_REPO_URL / el token y vuelve a desplegar."
-    fi
+    # NOTA: el scaffold (Fase 1) solo necesita el código + git + `php -l`.
+    # NO se corre `composer install`: instalar la app Laravel completa (PHP 8.4,
+    # ~40 extensiones, BD, redis) no aplica para generar un archivo de prueba.
+    # La validación (Fase 2, que sí corre pest) va mejor en CI. Ver RAILWAY.md.
+    git clone "$PHP_REPO_URL" "$REPO_PATH" \
+      && echo "▶ Repo PHP listo en $REPO_PATH (sin composer install)." \
+      || echo "⚠ git clone falló. Revisa PHP_REPO_URL / el token y vuelve a desplegar."
   else
     echo "▶ Repo PHP ya presente en $REPO_PATH (volumen persistente)."
   fi
