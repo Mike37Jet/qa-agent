@@ -1,0 +1,22 @@
+{
+  "name": "qa-agent",
+  "version": "1.0.0",
+  "description": "Agente QA: ClickUp → Gherkin → PEST (scaffold + validación)",
+  "scripts": {
+    "scaffold": "tsx src/phase1-scaffold.ts",
+    "validate": "tsx src/phase2-validate.ts",
+    "webhook": "tsx src/webhook-server.ts",
+    "tunnel": "tsx src/start-tunnel.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest",
+    "dotenv": "^16.0.0",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
