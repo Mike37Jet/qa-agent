@@ -51,11 +51,12 @@ ${gherkin}
 === FIN GHERKIN ===
 
 Pasos que debes ejecutar, en orden:
-1. Crea y cámbiate a la rama: git checkout -b ${taskId}
-2. Genera el archivo de prueba PEST aplicando el mapeo, en tests/Feature/${taskId}Test.php
-3. Verifica que el archivo es PHP válido: php -l tests/Feature/${taskId}Test.php
-4. Haz commit local: git add tests/Feature/${taskId}Test.php && git commit -m "test(${taskId}): scaffold BDD desde ClickUp"
-5. NO hagas push. Informa el resultado en pocas líneas.
+1. Parte de un main actualizado: git checkout main && git fetch origin main && git reset --hard origin/main
+2. Crea y cámbiate a la rama nueva (a partir de main): git checkout -b ${taskId}
+3. Genera el archivo de prueba PEST aplicando el mapeo, en tests/Feature/${taskId}Test.php
+4. Verifica que el archivo es PHP válido: php -l tests/Feature/${taskId}Test.php
+5. Haz commit local: git add tests/Feature/${taskId}Test.php && git commit -m "test(${taskId}): scaffold BDD desde ClickUp"
+6. NO hagas push. Informa el resultado en pocas líneas.
 `;
 
   for await (const message of query({
