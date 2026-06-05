@@ -5,8 +5,7 @@
   "scripts": {
     "scaffold": "tsx src/phase1-scaffold.ts",
     "validate": "tsx src/phase2-validate.ts",
-    "webhook": "tsx src/webhook-server.ts",
-    "tunnel": "tsx src/start-tunnel.ts"
+    "webhook": "tsx src/webhook-server.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "latest",
