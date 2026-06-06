@@ -1,6 +1,6 @@
 import { config as dotenvConfig } from "dotenv";
 dotenvConfig({ override: true });
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -113,34 +113,45 @@ async function runAgent(prompt: string, allowedTools: string[], maxTurns: number
 type Mode = "NEW" | "REGEN" | "DELTA";
 
 function prepareAndDetectMode(): Mode {
+  // Verifica que el repo esté realmente clonado antes de tocar git.
+  if (!existsSync(join(repoPath!, ".git"))) {
+    throw new Error(
+      `El repo PHP no está clonado en ${repoPath} (no existe ${repoPath}/.git). ` +
+      `Posibles causas: el clonado de arranque aún no termina, falló, o el volumen /data no está montado. ` +
+      `Revisa en la consola de Railway: ls -la ${repoPath}`
+    );
+  }
+
   // Sincroniza el remoto con el token actual (puede haber cambiado a write).
   const repoUrl = process.env.PHP_REPO_URL;
   if (repoUrl) git(["remote", "set-url", "origin", repoUrl], { allowFail: true });
 
   git(["fetch", "origin", "--prune"], { allowFail: true });
+  git(["fetch", "origin", "main"], { allowFail: true });
 
   const remoteExists = git(["ls-remote", "--heads", "origin", BRANCH], { allowFail: true }).length > 0;
 
   if (!remoteExists) {
     // Crea la rama desde main actualizado.
     git(["checkout", "main"], { allowFail: true });
-    git(["fetch", "origin", "main"], { allowFail: true });
     git(["reset", "--hard", "origin/main"], { allowFail: true });
     git(["checkout", "-B", BRANCH]);
     return "NEW";
   }
 
-  // La rama existe: trae el estado del remoto (incluye el trabajo del dev).
+  // La rama existe: trae el estado del remoto.
   git(["checkout", "-B", BRANCH, `origin/${BRANCH}`]);
 
-  // ¿Quién commiteó el archivo de test en esa rama?
-  const authorsRaw = git(["log", `origin/${BRANCH}`, "--format=%an", "--", TEST_REL], { allowFail: true });
-  const authors = authorsRaw.split("\n").map((s) => s.trim()).filter(Boolean);
+  // SEGURIDAD: ¿la rama tiene commits de un HUMANO (no del agente)?
+  // Miramos los commits propios de la rama (los que NO están en main).
+  // Si hay aunque sea uno de un autor distinto a "QA Agent" → es una rama del
+  // equipo → modo DELTA: NUNCA se hace push ni se modifica el archivo, solo se
+  // deja un comentario en ClickUp. El agente solo pushea a ramas 100% suyas.
+  const branchAuthorsRaw = git(["log", `origin/${BRANCH}`, "^origin/main", "--format=%an"], { allowFail: true });
+  const branchAuthors = branchAuthorsRaw.split("\n").map((s) => s.trim()).filter(Boolean);
 
-  const fileUntouched = authors.length === 0; // el archivo aún no existe en la rama
-  const onlyAgent = authors.length > 0 && authors.every((a) => a === AGENT_NAME);
-
-  return fileUntouched || onlyAgent ? "REGEN" : "DELTA";
+  const hasHumanCommits = branchAuthors.some((a) => a !== AGENT_NAME);
+  return hasHumanCommits ? "DELTA" : "REGEN";
 }
 
 // ─── Prompts ────────────────────────────────────────────────────────────────
