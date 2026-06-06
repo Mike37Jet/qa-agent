@@ -2,6 +2,7 @@ import { config as dotenvConfig } from "dotenv";
 dotenvConfig({ override: true });
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 const taskId = process.argv[2];
@@ -18,9 +19,27 @@ if (!teamId) throw new Error("Falta CLICKUP_TEAM_ID en .env");
 
 const rules = readFileSync(join(__dirname, "../prompts/scaffold.md"), "utf8");
 
+const AGENT_NAME = process.env.GIT_AUTHOR_NAME ?? "QA Agent";
+const MODEL = (process.env.SCAFFOLD_MODEL ?? "claude-haiku-4-5") as any;
+const TEST_REL = `tests/Feature/${taskId}Test.php`;
+
+// Marcadores del snapshot del Gherkin que se guarda en el header del test.
+// Permiten que futuras regeneraciones comparen la spec vieja vs la nueva.
+const SNAP_START = "=== GHERKIN SNAPSHOT (no editar) ===";
+const SNAP_END = "=== FIN GHERKIN SNAPSHOT ===";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
+function git(args: string[], opts: { allowFail?: boolean } = {}): string {
+  try {
+    return execFileSync("git", args, { cwd: repoPath, encoding: "utf8" }).trim();
+  } catch (e: any) {
+    if (opts.allowFail) return "";
+    throw new Error(`git ${args.join(" ")} falló: ${e.stderr || e.message}`);
+  }
+}
+
 // Trae la tarea de ClickUp y extrae SOLO el bloque Gherkin.
-// (Evita meter el JSON completo de la tarea —~140k chars— al contexto del agente:
-//  ese era el costo real. Aquí pasamos ~5k chars de Gherkin limpio.)
 async function fetchGherkin(id: string): Promise<string> {
   const url = `https://api.clickup.com/api/v2/task/${id}?custom_task_ids=true&team_id=${teamId}`;
   const res = await fetch(url, { headers: { Authorization: clickupToken! } });
@@ -31,62 +50,192 @@ async function fetchGherkin(id: string): Promise<string> {
   return idx >= 0 ? full.slice(idx).trim() : full.trim();
 }
 
-async function main() {
-  console.log(`\n🚀 Iniciando scaffold para tarea ${taskId}...\n`);
+async function postClickupComment(text: string): Promise<void> {
+  const url = `https://api.clickup.com/api/v2/task/${taskId}/comment?custom_task_ids=true&team_id=${teamId}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: clickupToken!, "Content-Type": "application/json" },
+    body: JSON.stringify({ comment_text: text, notify_all: false }),
+  });
+  if (!res.ok) throw new Error(`ClickUp comment falló ${res.status}: ${await res.text()}`);
+}
 
-  const gherkin = await fetchGherkin(taskId);
-  if (!gherkin) throw new Error(`No se encontró Gherkin en la descripción de ${taskId}`);
-  console.log(`📄 Gherkin extraído (${gherkin.length} chars)\n`);
+function extractSnapshot(fileContent: string): string {
+  const a = fileContent.indexOf(SNAP_START);
+  const b = fileContent.indexOf(SNAP_END);
+  if (a < 0 || b < 0 || b <= a) return "";
+  return fileContent.slice(a + SNAP_START.length, b).trim();
+}
 
-  const prompt = `
-${rules}
-
-Tarea a procesar: ${taskId}
-
-A continuación tienes el bloque Gherkin de la tarea (ya extraído de ClickUp).
-NO necesitas hacer ninguna llamada de red ni curl: usa este texto tal cual.
-
-=== GHERKIN ===
-${gherkin}
-=== FIN GHERKIN ===
-
-Pasos que debes ejecutar, en orden:
-1. Parte de un main actualizado: git checkout main && git fetch origin main && git reset --hard origin/main
-2. Crea y cámbiate a la rama nueva (a partir de main): git checkout -b ${taskId}
-3. Genera el archivo de prueba PEST aplicando el mapeo, en tests/Feature/${taskId}Test.php
-4. Verifica que el archivo es PHP válido: php -l tests/Feature/${taskId}Test.php
-5. Haz commit local: git add tests/Feature/${taskId}Test.php && git commit -m "test(${taskId}): scaffold BDD desde ClickUp"
-6. NO hagas push. Informa el resultado en pocas líneas.
-`;
-
+// Corre el agente y devuelve el texto final (result). Loguea las tool_use.
+async function runAgent(prompt: string, allowedTools: string[], maxTurns: number): Promise<string> {
+  let result = "";
   for await (const message of query({
     prompt,
     options: {
       cwd: repoPath,
-      // Sin curl: el agente solo escribe el archivo y corre git/php.
-      allowedTools: ["Write", "Edit", "Bash"],
+      allowedTools,
       permissionMode: "default",
-      // Aísla el agente: NO carga plugins del usuario (memoria, etc.),
-      // CLAUDE.md ni settings del filesystem → menos tokens, sin pasos extra.
       settingSources: [],
-      maxTurns: 15,
+      model: MODEL,
+      maxTurns,
     },
   }) as AsyncIterable<SDKMessage>) {
     if (message.type === "assistant") {
       const content = (message as any).message?.content ?? [];
       for (const block of content) {
-        if (block.type === "tool_use") {
-          console.log(`  → ${block.name}`, block.input?.command ?? "");
-        }
+        if (block.type === "tool_use") console.log(`  → ${block.name}`, block.input?.command ?? "");
       }
     }
-
     if (message.type === "result") {
-      const isSuccess = (message as any).subtype === "success";
-      const icon = isSuccess ? "✅" : "❌";
-      console.log(`\n${icon} RESULTADO:\n`, (message as any).result ?? (message as any).error);
+      result = (message as any).result ?? (message as any).error ?? "";
     }
   }
+  return result;
+}
+
+// ─── Modo de operación según el estado de la rama ───────────────────────────
+// NEW   : la rama no existe en el remoto → crear desde main + generar + push
+// REGEN : la rama existe pero solo el agente la tocó → regenerar + push
+// DELTA : la rama existe y el dev ya implementó → NO tocar, comentar el delta
+type Mode = "NEW" | "REGEN" | "DELTA";
+
+function prepareAndDetectMode(): Mode {
+  // Sincroniza el remoto con el token actual (puede haber cambiado a write).
+  const repoUrl = process.env.PHP_REPO_URL;
+  if (repoUrl) git(["remote", "set-url", "origin", repoUrl], { allowFail: true });
+
+  git(["fetch", "origin", "--prune"], { allowFail: true });
+
+  const remoteExists = git(["ls-remote", "--heads", "origin", taskId], { allowFail: true }).length > 0;
+
+  if (!remoteExists) {
+    // Crea la rama desde main actualizado.
+    git(["checkout", "main"], { allowFail: true });
+    git(["fetch", "origin", "main"], { allowFail: true });
+    git(["reset", "--hard", "origin/main"], { allowFail: true });
+    git(["checkout", "-B", taskId]);
+    return "NEW";
+  }
+
+  // La rama existe: trae el estado del remoto (incluye el trabajo del dev).
+  git(["checkout", "-B", taskId, `origin/${taskId}`]);
+
+  // ¿Quién commiteó el archivo de test en esa rama?
+  const authorsRaw = git(["log", `origin/${taskId}`, "--format=%an", "--", TEST_REL], { allowFail: true });
+  const authors = authorsRaw.split("\n").map((s) => s.trim()).filter(Boolean);
+
+  const fileUntouched = authors.length === 0; // el archivo aún no existe en la rama
+  const onlyAgent = authors.length > 0 && authors.every((a) => a === AGENT_NAME);
+
+  return fileUntouched || onlyAgent ? "REGEN" : "DELTA";
+}
+
+// ─── Prompts ────────────────────────────────────────────────────────────────
+
+function generatePrompt(gherkin: string): string {
+  return `
+${rules}
+
+Tarea a procesar: ${taskId}
+
+Genera el archivo de prueba PEST y escríbelo con la herramienta Write en la ruta exacta:
+  ${TEST_REL}
+
+El archivo DEBE empezar con un bloque de comentario que contenga el SNAPSHOT del Gherkin,
+EXACTAMENTE entre estos marcadores (esto permite comparar la spec en futuras regeneraciones):
+
+/*
+${SNAP_START}
+${gherkin}
+${SNAP_END}
+*/
+
+Debajo del snapshot, genera los tests siguiendo las reglas del prompt (describe + un it() por
+Scenario, comentarios Given/When/Then, expect() reales o ->todo(), TODO(dev) donde falte detalle).
+
+IMPORTANTE:
+- NO ejecutes git, NO hagas commit ni push: de eso se encarga el sistema automáticamente.
+- Solo escribe el archivo con Write y valida la sintaxis con: php -l ${TEST_REL}
+- Informa en pocas líneas cuántos escenarios generaste.
+
+=== GHERKIN ===
+${gherkin}
+=== FIN GHERKIN ===
+`;
+}
+
+function deltaPrompt(oldGherkin: string, newGherkin: string): string {
+  return `
+La especificación (Gherkin) de la tarea ${taskId} cambió, y el dev YA implementó tests sobre la
+versión anterior en el archivo ${TEST_REL}. NO se debe tocar su código: tu única tarea es redactar
+un resumen claro y accionable de QUÉ cambió entre la spec anterior y la nueva, para que el dev
+ajuste sus tests a mano.
+
+Redacta un comentario breve en markdown con:
+- Escenarios AGREGADOS, ELIMINADOS o RENOMBRADOS (menciona sus nombres).
+- Parámetros nuevos o modificados en los Examples / tablas.
+- Cambios en pasos Given / When / Then.
+Sé concreto y menciona los nombres de los escenarios afectados. NO incluyas código PEST completo,
+solo el delta de la especificación. Devuelve SOLO el texto del comentario (sin preámbulos).
+
+=== GHERKIN ANTERIOR ===
+${oldGherkin || "(no disponible: el test no tenía snapshot previo; describe la spec nueva y pide al dev revisar todos los escenarios)"}
+
+=== GHERKIN NUEVO ===
+${newGherkin}
+`;
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────
+
+async function main() {
+  console.log(`\n🚀 Iniciando scaffold para tarea ${taskId}...\n`);
+
+  const gherkin = await fetchGherkin(taskId);
+  if (!gherkin) throw new Error(`No se encontró Gherkin en la descripción de ${taskId}`);
+  console.log(`📄 Gherkin extraído (${gherkin.length} chars)`);
+
+  const mode = prepareAndDetectMode();
+  console.log(`🔎 Modo: ${mode} (rama ${taskId})\n`);
+
+  if (mode === "DELTA") {
+    // El dev ya implementó: NO tocamos el archivo. Generamos y publicamos el delta.
+    const oldFile = git(["show", `origin/${taskId}:${TEST_REL}`], { allowFail: true });
+    const oldGherkin = extractSnapshot(oldFile);
+
+    console.log("✋ El dev ya implementó este test. Generando resumen del delta...\n");
+    const delta = await runAgent(deltaPrompt(oldGherkin, gherkin), [], 8);
+
+    const comment =
+      `🤖 **qa-agent**: la especificación cambió y este test ya tiene implementación del dev, ` +
+      `así que NO modifiqué el archivo para no romper tu trabajo.\n\n` +
+      `**Cambios en la spec que debes revisar:**\n\n${delta}`;
+
+    await postClickupComment(comment);
+    console.log(`\n✅ Delta publicado como comentario en ClickUp. El archivo del dev NO se tocó.`);
+    return;
+  }
+
+  // NEW o REGEN: el agente (re)genera el archivo; el sistema hace commit + push.
+  await runAgent(generatePrompt(gherkin), ["Write", "Bash"], 15);
+
+  const dirty = git(["status", "--porcelain", TEST_REL], { allowFail: true }).length > 0;
+  if (!dirty) {
+    console.log(`\nℹ️ Sin cambios en ${TEST_REL} (la regeneración produjo el mismo contenido). No se hace commit.`);
+    return;
+  }
+
+  const msg =
+    mode === "NEW"
+      ? `test(${taskId}): scaffold BDD desde ClickUp`
+      : `test(${taskId}): regenera scaffold BDD desde ClickUp`;
+
+  git(["add", TEST_REL]);
+  git(["commit", "-m", msg]);
+  git(["push", "-u", "origin", taskId]);
+
+  console.log(`\n✅ ${mode === "NEW" ? "Creado" : "Regenerado"} y pusheado a origin/${taskId}.`);
 }
 
 main().catch((err) => {

@@ -76,6 +76,10 @@ Ejecuta, en orden:
       permissionMode: "default",
       // Aísla el agente: sin plugins del usuario (memoria, etc.) ni settings del FS.
       settingSources: [],
+      // Modelo configurable via variable de entorno VALIDATE_MODEL en Railway.
+      // Default: claude-sonnet-4-5 (~$0.05/validación)
+      // Para ahorrar: claude-haiku-4-5 (~$0.005/validación)
+      model: (process.env.VALIDATE_MODEL ?? "claude-sonnet-4-5") as any,
       maxTurns: 20,
     },
   }) as AsyncIterable<SDKMessage>) {

@@ -14,5 +14,12 @@ Reglas:
    (puede quedar como ->todo() si aún no hay implementación, pero NO lo elimines).
 3. No inventes lógica de negocio: si falta detalle, deja un `// TODO(dev): ...`.
 4. El nombre del archivo es tests/Feature/<ID>Test.php (ej: tests/Feature/DEV-4567Test.php).
-5. No toques otros archivos. No hagas push. Solo crea el archivo y haz commit local.
-6. Antes de hacer el commit verifica que el archivo es PHP sintácticamente válido con: php -l
+5. No toques otros archivos. No ejecutes git: el sistema se encarga del commit/push.
+6. Antes de terminar verifica que el archivo es PHP sintácticamente válido con: php -l
+
+## Snapshot del Gherkin
+
+El archivo SIEMPRE debe empezar con un bloque de comentario que contenga el Gherkin original,
+entre los marcadores `=== GHERKIN SNAPSHOT (no editar) ===` y `=== FIN GHERKIN SNAPSHOT ===`.
+El sistema usa ese snapshot para detectar, en futuras ejecuciones, qué cambió en la spec
+respecto a la versión anterior, sin sobreescribir el trabajo que el dev haya implementado.
