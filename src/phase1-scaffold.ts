@@ -20,7 +20,10 @@ if (!teamId) throw new Error("Falta CLICKUP_TEAM_ID en .env");
 const rules = readFileSync(join(__dirname, "../prompts/scaffold.md"), "utf8");
 
 const AGENT_NAME = process.env.GIT_AUTHOR_NAME ?? "QA Agent";
-const MODEL = (process.env.SCAFFOLD_MODEL ?? "claude-haiku-4-5") as any;
+// Generación del test (frecuente): Haiku por defecto, barato.
+const SCAFFOLD_MODEL = (process.env.SCAFFOLD_MODEL ?? "claude-haiku-4-5") as any;
+// Delta razonado (ocasional): Sonnet por defecto, más fiable comparando specs.
+const DELTA_MODEL = (process.env.DELTA_MODEL ?? "claude-sonnet-4-5") as any;
 const TEST_REL = `tests/Feature/${taskId}Test.php`;
 
 // Marcadores del snapshot del Gherkin que se guarda en el header del test.
@@ -68,7 +71,7 @@ function extractSnapshot(fileContent: string): string {
 }
 
 // Corre el agente y devuelve el texto final (result). Loguea las tool_use.
-async function runAgent(prompt: string, allowedTools: string[], maxTurns: number): Promise<string> {
+async function runAgent(prompt: string, allowedTools: string[], maxTurns: number, model: any): Promise<string> {
   let result = "";
   for await (const message of query({
     prompt,
@@ -77,7 +80,7 @@ async function runAgent(prompt: string, allowedTools: string[], maxTurns: number
       allowedTools,
       permissionMode: "default",
       settingSources: [],
-      model: MODEL,
+      model,
       maxTurns,
     },
   }) as AsyncIterable<SDKMessage>) {
@@ -205,7 +208,7 @@ async function main() {
     const oldGherkin = extractSnapshot(oldFile);
 
     console.log("✋ El dev ya implementó este test. Generando resumen del delta...\n");
-    const delta = await runAgent(deltaPrompt(oldGherkin, gherkin), [], 8);
+    const delta = await runAgent(deltaPrompt(oldGherkin, gherkin), [], 8, DELTA_MODEL);
 
     const comment =
       `🤖 **qa-agent**: la especificación cambió y este test ya tiene implementación del dev, ` +
@@ -218,7 +221,7 @@ async function main() {
   }
 
   // NEW o REGEN: el agente (re)genera el archivo; el sistema hace commit + push.
-  await runAgent(generatePrompt(gherkin), ["Write", "Bash"], 15);
+  await runAgent(generatePrompt(gherkin), ["Write", "Bash"], 15, SCAFFOLD_MODEL);
 
   const dirty = git(["status", "--porcelain", TEST_REL], { allowFail: true }).length > 0;
   if (!dirty) {
