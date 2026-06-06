@@ -49,11 +49,28 @@ async function getCommentText(internalTaskId: string, commentId: string): Promis
   return found.comment_text ?? (found.comment ?? []).map((b) => b.text).join("") ?? "";
 }
 
-function runAgent(script: "scaffold" | "validate", taskId: string): void {
-  const scriptFile = join(__dirname, `phase${script === "scaffold" ? "1" : "2"}-${script}.ts`);
-  console.log(`\n▶ Ejecutando ${script} para ${taskId}...`);
+// Saneamiento de la etiqueta de rama que viene del comentario de ClickUp.
+// Convierte "Billing QA!" → "billing-qa". Solo deja [a-z0-9-_], sin espacios ni
+// caracteres peligrosos para un nombre de rama git. Máx 50 chars.
+function sanitizeBranchLabel(raw: string): string {
+  return raw
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9._-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "")
+    .slice(0, 50);
+}
 
-  execFile("npx", ["tsx", scriptFile, taskId], { cwd: join(__dirname, "..") }, (err, stdout, stderr) => {
+function runAgent(script: "scaffold" | "validate", taskId: string, label = ""): void {
+  const scriptFile = join(__dirname, `phase${script === "scaffold" ? "1" : "2"}-${script}.ts`);
+  console.log(`\n▶ Ejecutando ${script} para ${taskId}${label ? ` (etiqueta: ${label})` : ""}...`);
+
+  const args = ["tsx", scriptFile, taskId];
+  if (label) args.push(label);
+
+  execFile("npx", args, { cwd: join(__dirname, "..") }, (err, stdout, stderr) => {
     if (stdout) console.log(stdout);
     if (stderr) console.error(stderr);
     if (err) console.error(`[${taskId}] Error en ${script}:`, err.message);
@@ -99,6 +116,7 @@ app.post("/webhook", async (req: Request, res: Response) => {
 
   let shouldValidate = false;
   let shouldScaffold = false;
+  let scaffoldLabel = ""; // sufijo opcional de rama tomado del comentario
 
   // ── Trigger 1: cambio de estado a "complete" (DESACTIVADO por ahora) ────────
   // if (event === "taskStatusUpdated") {
@@ -128,8 +146,12 @@ app.post("/webhook", async (req: Request, res: Response) => {
       // Laravel completa (BD, redis, extensiones). Se hará en CI más adelante.
       console.log(`  → "${KEYWORD_VALIDATE}" detectado, pero la validación está DESACTIVADA en el servidor (Fase 2 → CI).`);
     } else if (text.includes(KEYWORD_SCAFFOLD)) {
-      console.log(`  → "${KEYWORD_SCAFFOLD}" detectado: lanzando scaffold`);
       shouldScaffold = true;
+      // Lo que el usuario escriba DESPUÉS de "@agente_qa genera" es la etiqueta
+      // de rama. Ej: "@agente_qa genera billing-qa" → rama DEV-XXXX-billing-qa.
+      const after = commentText.slice(commentText.toLowerCase().indexOf(KEYWORD_SCAFFOLD) + KEYWORD_SCAFFOLD.length);
+      scaffoldLabel = sanitizeBranchLabel(after);
+      console.log(`  → "${KEYWORD_SCAFFOLD}" detectado: lanzando scaffold${scaffoldLabel ? ` (etiqueta: ${scaffoldLabel})` : ""}`);
     }
   }
 
@@ -155,7 +177,7 @@ app.post("/webhook", async (req: Request, res: Response) => {
       return;
     }
     console.log(`  → custom_id resuelto: ${customId}`);
-    if (shouldScaffold) runAgent("scaffold", customId);
+    if (shouldScaffold) runAgent("scaffold", customId, scaffoldLabel);
     if (shouldValidate) runAgent("validate", customId);
   }
 });

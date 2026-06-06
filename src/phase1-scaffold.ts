@@ -24,6 +24,15 @@ const AGENT_NAME = process.env.GIT_AUTHOR_NAME ?? "QA Agent";
 const SCAFFOLD_MODEL = (process.env.SCAFFOLD_MODEL ?? "claude-haiku-4-5") as any;
 // Delta razonado (ocasional): Sonnet por defecto, más fiable comparando specs.
 const DELTA_MODEL = (process.env.DELTA_MODEL ?? "claude-sonnet-4-5") as any;
+
+// Nombre de la rama = ID de la tarea + etiqueta opcional.
+// La etiqueta viene del comentario de ClickUp ("@agente_qa genera billing-qa" → argv[3]),
+// con prioridad sobre la variable de entorno BRANCH_SUFFIX (fallback global para pruebas).
+// Ej: taskId=DEV-8697 + label="billing-qa" → rama DEV-8697-billing-qa. Sin etiqueta → DEV-8697.
+const branchLabel = (process.argv[3] || process.env.BRANCH_SUFFIX || "").replace(/^-+/, "").trim();
+const BRANCH = branchLabel ? `${taskId}-${branchLabel}` : taskId;
+
+// El nombre del archivo SIEMPRE usa el ID puro (no el sufijo de rama).
 const TEST_REL = `tests/Feature/${taskId}Test.php`;
 
 // Marcadores del snapshot del Gherkin que se guarda en el header del test.
@@ -110,22 +119,22 @@ function prepareAndDetectMode(): Mode {
 
   git(["fetch", "origin", "--prune"], { allowFail: true });
 
-  const remoteExists = git(["ls-remote", "--heads", "origin", taskId], { allowFail: true }).length > 0;
+  const remoteExists = git(["ls-remote", "--heads", "origin", BRANCH], { allowFail: true }).length > 0;
 
   if (!remoteExists) {
     // Crea la rama desde main actualizado.
     git(["checkout", "main"], { allowFail: true });
     git(["fetch", "origin", "main"], { allowFail: true });
     git(["reset", "--hard", "origin/main"], { allowFail: true });
-    git(["checkout", "-B", taskId]);
+    git(["checkout", "-B", BRANCH]);
     return "NEW";
   }
 
   // La rama existe: trae el estado del remoto (incluye el trabajo del dev).
-  git(["checkout", "-B", taskId, `origin/${taskId}`]);
+  git(["checkout", "-B", BRANCH, `origin/${BRANCH}`]);
 
   // ¿Quién commiteó el archivo de test en esa rama?
-  const authorsRaw = git(["log", `origin/${taskId}`, "--format=%an", "--", TEST_REL], { allowFail: true });
+  const authorsRaw = git(["log", `origin/${BRANCH}`, "--format=%an", "--", TEST_REL], { allowFail: true });
   const authors = authorsRaw.split("\n").map((s) => s.trim()).filter(Boolean);
 
   const fileUntouched = authors.length === 0; // el archivo aún no existe en la rama
@@ -200,11 +209,11 @@ async function main() {
   console.log(`📄 Gherkin extraído (${gherkin.length} chars)`);
 
   const mode = prepareAndDetectMode();
-  console.log(`🔎 Modo: ${mode} (rama ${taskId})\n`);
+  console.log(`🔎 Modo: ${mode} (rama ${BRANCH})\n`);
 
   if (mode === "DELTA") {
     // El dev ya implementó: NO tocamos el archivo. Generamos y publicamos el delta.
-    const oldFile = git(["show", `origin/${taskId}:${TEST_REL}`], { allowFail: true });
+    const oldFile = git(["show", `origin/${BRANCH}:${TEST_REL}`], { allowFail: true });
     const oldGherkin = extractSnapshot(oldFile);
 
     console.log("✋ El dev ya implementó este test. Generando resumen del delta...\n");
@@ -236,9 +245,9 @@ async function main() {
 
   git(["add", TEST_REL]);
   git(["commit", "-m", msg]);
-  git(["push", "-u", "origin", taskId]);
+  git(["push", "-u", "origin", BRANCH]);
 
-  console.log(`\n✅ ${mode === "NEW" ? "Creado" : "Regenerado"} y pusheado a origin/${taskId}.`);
+  console.log(`\n✅ ${mode === "NEW" ? "Creado" : "Regenerado"} y pusheado a origin/${BRANCH}.`);
 }
 
 main().catch((err) => {
